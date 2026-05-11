@@ -1,0 +1,34 @@
+{
+  "_readme": [
+    "autoMap: true means ANY JotForm form works automatically.",
+    "No new entries needed in 'forms' when a new form is created.",
+    "Custom fields are auto-created in Bitrix24 on first submission.",
+    "globalRouting applies to ALL forms organisation-wide.",
+    "Only add to 'forms' if one specific form needs different behaviour."
+  ],
+
+  "autoMap": true,
+
+  "globalRouting": {
+    "_comment": "This routing applies to every form in the organisation.",
+    "_comment2": "The field name is matched case-insensitively against all JotForm fields.",
+    "_comment3": "If a form uses a different field name for category, add it to 'forms' below.",
+    "field": "requestCategory",
+    "rules": {
+      "Facilities":  "FACILITIES",
+      "Bio-medical": "BIOMEDICAL",
+      "Admin":       "ADMIN"
+    },
+    "default": "ADMIN"
+  },
+
+  "globalDefaults": {
+    "lead": {
+      "SOURCE_ID": "WEB",
+      "STATUS_ID": "NEW",
+      "ASSIGNED_BY_ID": "11"
+    }
+  },
+
+  "forms": {}
+}
