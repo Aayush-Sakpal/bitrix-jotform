@@ -11,16 +11,30 @@ import type {
   BitrixDealFields,
 } from '../types/bitrix.types';
 
+// ── Bitrix24 error codes that must never be retried ───────────────────────────
+// FIX: Added ERROR_ prefixed variants — these are the ACTUAL codes Bitrix24
+// sends in body.error. The non-prefixed versions never appear in practice.
 const NON_RETRYABLE = new Set([
-  'INVALID_CREDENTIALS', 'WRONG_LOGIN', 'ACCESS_DENIED', 'METHOD_NOT_FOUND',
+  'INVALID_CREDENTIALS',
+  'ERROR_INVALID_CREDENTIALS',
+  'WRONG_LOGIN',
+  'ERROR_WRONG_LOGIN',
+  'ACCESS_DENIED',
+  'ERROR_ACCESS_DENIED',
+  'METHOD_NOT_FOUND',
+  'ERROR_METHOD_NOT_FOUND',   // ← this was the missing one causing 5 retries
+  'INVALID_ARG_VALUE',
+  'ERROR_INVALID_ARG_VALUE',
 ]);
 
 class RateLimiter {
-  private lastCallAt = 0;
+  private lastCallAt    = 0;
   private readonly minInterval: number;
+
   constructor(callsPerSecond: number) {
     this.minInterval = Math.ceil(1000 / callsPerSecond);
   }
+
   async throttle(): Promise<void> {
     const wait = this.minInterval - (Date.now() - this.lastCallAt);
     if (wait > 0) await new Promise(r => setTimeout(r, wait));
@@ -29,13 +43,10 @@ class RateLimiter {
 }
 
 export class BitrixClient {
-  private readonly http: AxiosInstance;
+  private readonly http:    AxiosInstance;
   private readonly limiter: RateLimiter;
 
-  /** Public so FieldRegistry can reference it for logging. */
   readonly departmentKey: string;
-
-  /** Each client owns its registry — one registry per Bitrix24 portal. */
   readonly fieldRegistry: FieldRegistry;
 
   constructor(departmentKey: string, cfg: BitrixDepartmentConfig) {
@@ -63,19 +74,25 @@ export class BitrixClient {
     );
   }
 
+  // ── Standard retrying call — used for Lead/Contact/Deal operations ─────────
   private async call<T>(method: string, params: Record<string, unknown>): Promise<T> {
     return withRetry(
       async () => {
         await this.limiter.throttle();
         const res  = await this.http.post<BitrixApiResponse<T>>(`/${method}`, params);
         const body = res.data;
+
         if (body.error) {
           const retryable = !NON_RETRYABLE.has(body.error);
           throw Object.assign(
-            new Error(`Bitrix24[${this.departmentKey}] [${body.error}]: ${body.error_description ?? 'unknown'}`),
-            { retryable }
+            new Error(
+              `Bitrix24[${this.departmentKey}] [${body.error}]: ` +
+              `${body.error_description ?? 'unknown'}`
+            ),
+            { retryable, bitrixCode: body.error }
           );
         }
+
         return body.result as T;
       },
       {
@@ -91,6 +108,30 @@ export class BitrixClient {
       },
       `bitrix[${this.departmentKey}].${method}`
     );
+  }
+
+  // ── Single-attempt call — used for field management only ─────────────────
+  // Field creation/inspection is best-effort. We never want to retry these
+  // because:
+  //   a) ERROR_METHOD_NOT_FOUND won't fix itself on retry
+  //   b) Field already existing is not an error
+  //   c) We don't want field management issues to delay Lead creation
+  async callOnce<T>(method: string, params: Record<string, unknown>): Promise<T> {
+    await this.limiter.throttle();
+    const res  = await this.http.post<BitrixApiResponse<T>>(`/${method}`, params);
+    const body = res.data;
+
+    if (body.error) {
+      throw Object.assign(
+        new Error(
+          `Bitrix24[${this.departmentKey}] [${body.error}]: ` +
+          `${body.error_description ?? 'unknown'}`
+        ),
+        { bitrixCode: body.error }
+      );
+    }
+
+    return body.result as T;
   }
 
   // ── CRM entity methods ────────────────────────────────────────────────────
@@ -126,7 +167,7 @@ export class BitrixClient {
         return parseInt(rows[0].ID, 10);
       }
     } catch (err) {
-      logger.warn('Duplicate check failed — proceeding', {
+      logger.warn('Duplicate check failed — proceeding with creation', {
         department: this.departmentKey,
         error: err instanceof Error ? err.message : String(err),
       });
@@ -134,30 +175,30 @@ export class BitrixClient {
     return null;
   }
 
-  // ── Field management methods (used by FieldRegistry) ─────────────────────
+  // ── Field management methods ──────────────────────────────────────────────
 
   /**
-   * Fetches ALL field definitions for CRM Leads in this portal.
-   * Returns a plain object keyed by field name — e.g. { EMAIL: {...}, UF_CRM_LOCATION: {...} }
+   * Fetches ALL Lead field definitions from this portal.
+   * Uses callOnce — no retries needed, this is read-only discovery.
    */
   async getLeadFields(): Promise<Record<string, unknown>> {
-    return this.call<Record<string, unknown>>('crm.lead.fields', {});
+    return this.callOnce<Record<string, unknown>>('crm.lead.fields', {});
   }
 
   /**
-   * Creates a new string-type custom field on CRM Leads.
+   * Creates a new string custom field on CRM Leads.
+   * Uses callOnce — field creation must never be retried because:
+   *   - Retrying a successful creation causes a DUPLICATE error
+   *   - Retrying a METHOD_NOT_FOUND won't suddenly grant permissions
    *
-   * @param suffix  The part AFTER UF_CRM_ — e.g. "FACILITIES_SERVICE"
+   * @param suffix  The part AFTER UF_CRM_  e.g. "FACILITIES_SERVICE"
    * @param label   Human-readable label shown in Bitrix24 UI
-   *
-   * Bitrix24 stores the field as UF_CRM_{suffix}.
-   * Throws if the field already exists (caller handles this).
    */
   async createLeadField(suffix: string, label: string): Promise<void> {
-    await this.call<unknown>('crm.userfield.add', {
+    await this.callOnce<unknown>('crm.userfield.add', {
       fields: {
         ENTITY_ID:         'CRM_LEAD',
-        FIELD_NAME:        suffix,        // Bitrix24 prepends UF_CRM_ automatically
+        FIELD_NAME:        suffix,
         USER_TYPE_ID:      'string',
         EDIT_FORM_LABEL:   label,
         LIST_COLUMN_LABEL: label,
@@ -173,7 +214,7 @@ export class BitrixClient {
 
   async healthCheck(): Promise<boolean> {
     try {
-      await this.call<unknown>('app.info', {});
+      await this.callOnce<unknown>('app.info', {});
       return true;
     } catch {
       return false;
@@ -181,10 +222,8 @@ export class BitrixClient {
   }
 }
 
-/**
- * Registry that holds one BitrixClient per department.
- * Instantiated once at startup.
- */
+// ── Client registry ───────────────────────────────────────────────────────────
+
 export class BitrixClientRegistry {
   private readonly clients: Map<string, BitrixClient> = new Map();
 
@@ -192,14 +231,13 @@ export class BitrixClientRegistry {
     for (const [key, cfg] of Object.entries(config.bitrix.departments)) {
       const client = new BitrixClient(key, cfg);
       this.clients.set(key.toUpperCase(), client);
-      logger.info('Bitrix24 client registered', { department: key, domain: cfg.domain });
+      logger.info('Bitrix24 client registered', {
+        department: key,
+        domain:     cfg.domain,
+      });
     }
   }
 
-  /**
-   * Initialises all field registries in parallel.
-   * Call this once at server startup so the first submission is fast.
-   */
   async initAllRegistries(): Promise<void> {
     await Promise.all(
       [...this.clients.values()].map(c => c.fieldRegistry.init())
