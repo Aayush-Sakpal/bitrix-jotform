@@ -64,9 +64,9 @@ export class MappingService {
     try {
       const parsed = JSON.parse(fs.readFileSync(p, 'utf-8')) as MappingConfig;
       logger.info('Mapping config loaded', {
-        formCount:  Object.keys(parsed.forms).length,
+        formCount: Object.keys(parsed.forms).length,
         hasDefault: !!parsed.defaultForm,
-        autoMap:    parsed.autoMap ?? false,
+        autoMap: parsed.autoMap ?? false,
       });
       return parsed;
     } catch (err) {
@@ -84,7 +84,7 @@ export class MappingService {
 
   getFormConfig(formId: string): FormMappingConfig | null {
     if (this.cfg.forms[formId]) return this.cfg.forms[formId]!;
-    if (this.cfg.defaultForm)  return this.cfg.defaultForm;
+    if (this.cfg.defaultForm) return this.cfg.defaultForm;
     return null;
   }
 
@@ -120,7 +120,7 @@ export class MappingService {
         if (mapping.required) {
           logger.warn('Required field missing', {
             submissionId: submission.submissionId,
-            field:        mapping.jotformField,
+            field: mapping.jotformField,
           });
         }
         continue;
@@ -134,7 +134,7 @@ export class MappingService {
       if (ftype === 'email' || ftype === 'phone' || ftype === 'web') {
         if (!multi[mapping.bitrixField]) multi[mapping.bitrixField] = [];
         multi[mapping.bitrixField]!.push({
-          VALUE:      String(transformed),
+          VALUE: String(transformed),
           VALUE_TYPE: mapping.valueType ?? 'WORK',
         });
       } else if (ftype === 'float') {
@@ -194,7 +194,8 @@ export class MappingService {
 
       // Skip empty values
       const strValue = jotformService.fieldToString(value);
-      if (!strValue || strValue.trim() === '') continue;
+      // if (!strValue || strValue.trim() === '') continue;
+      const finalValue = !strValue || strValue.trim() === '' ? 'NA' : strValue.trim();
 
       const bare = rawKey.replace(/^q\d+_/i, '');
 
@@ -205,29 +206,43 @@ export class MappingService {
       // We do NOT create a separate UF_CRM_ field for email/phone because
       // the built-in EMAIL/PHONE fields are the correct Bitrix24 home for them.
       if (matchesAny(bare, EMAIL_PATTERNS)) {
-        if (!multi['EMAIL']) multi['EMAIL'] = [];
-        multi['EMAIL'].push({ VALUE: strValue.trim(), VALUE_TYPE: 'WORK' });
+        if (finalValue !== 'NA') {
+          if (!multi['EMAIL']) multi['EMAIL'] = [];
+
+          multi['EMAIL'].push({
+            VALUE: finalValue,
+            VALUE_TYPE: 'WORK'
+          });
+        }
+
         continue;
       }
 
       // ── Phone → built-in PHONE multi-value field only ─────────────────
       if (matchesAny(bare, PHONE_PATTERNS)) {
-        if (!multi['PHONE']) multi['PHONE'] = [];
-        multi['PHONE'].push({ VALUE: strValue.trim(), VALUE_TYPE: 'WORK' });
+        if (finalValue !== 'NA') {
+          if (!multi['PHONE']) multi['PHONE'] = [];
+
+          multi['PHONE'].push({
+            VALUE: finalValue,
+            VALUE_TYPE: 'WORK'
+          });
+        }
+
         continue;
       }
 
       // ── Title candidate ───────────────────────────────────────────────
       if (!titleCandidate && matchesAny(bare, TITLE_PATTERNS)) {
-        titleCandidate = strValue.trim();
+        titleCandidate = finalValue;
       }
 
       // ── Everything else → custom field ────────────────────────────────
       const bitrixField = toBitrixFieldName(rawKey);
-      const label       = toHumanLabel(bare);
+      const label = toHumanLabel(bare);
 
       fieldEnsurePromises.push(client.fieldRegistry.ensureField(bitrixField, label));
-      result[bitrixField] = strValue.trim();
+      result[bitrixField] = finalValue;
     }
 
     // Wait for all field checks/creations before sending to Bitrix24
@@ -269,7 +284,7 @@ export class MappingService {
     if (!val) {
       logger.warn('Routing field is empty in submission', {
         requestId,
-        field:        routingConfig.field,
+        field: routingConfig.field,
         submissionId: submission.submissionId,
       });
     }
@@ -282,8 +297,8 @@ export class MappingService {
     if (matched) {
       logger.info('Submission routed to department', {
         requestId,
-        field:      routingConfig.field,
-        value:      val,
+        field: routingConfig.field,
+        value: val,
         department: matched,
       });
       return matched.toUpperCase();
@@ -292,8 +307,8 @@ export class MappingService {
     if (routingConfig.default) {
       logger.warn('No routing rule matched — using default department', {
         requestId,
-        value:          val,
-        default:        routingConfig.default,
+        value: val,
+        default: routingConfig.default,
         availableRules: Object.keys(routingConfig.rules),
       });
       return routingConfig.default.toUpperCase();
@@ -301,8 +316,8 @@ export class MappingService {
 
     logger.error('No routing rule matched and no default set — submission dropped', {
       requestId,
-      field:          routingConfig.field,
-      value:          val,
+      field: routingConfig.field,
+      value: val,
       availableRules: Object.keys(routingConfig.rules),
     });
     return null;
@@ -363,10 +378,10 @@ export class MappingService {
   ): string | number | null {
     const str = jotformService.fieldToString(value);
     switch (transform) {
-      case 'none':        return str;
-      case 'trim':        return str.trim();
-      case 'uppercase':   return str.toUpperCase();
-      case 'lowercase':   return str.toLowerCase();
+      case 'none': return str;
+      case 'trim': return str.trim();
+      case 'uppercase': return str.toUpperCase();
+      case 'lowercase': return str.toLowerCase();
       case 'nameToTitle': return str ? `Deal from ${str}` : null;
       case 'joinName': {
         if (jotformService.isNameField(value)) {
