@@ -7,24 +7,39 @@ import { bitrixRegistry } from '../services/bitrix.service';
 import { jotformBodySchema } from '../validators/webhook.validator';
 import type {
   BitrixLeadFields,
-  // BitrixContactFields,
-  // BitrixDealFields,
+  BitrixContactFields,
+  BitrixDealFields,
 } from '../types/bitrix.types';
-// import type { FormMappingConfig } from '../types/mapping.types';
+import type { FormMappingConfig } from '../types/mapping.types';
 import type { ParsedJotFormSubmission } from '../types/jotform.types';
 
 export class WebhookController {
 
-  async handleJotFormWebhook(req: Request, res: Response, next: NextFunction): Promise<void> {
+  // ── Webhook entry point ───────────────────────────────────────────────────
+
+  async handleJotFormWebhook(
+    req: Request,
+    res: Response,
+    next: NextFunction
+  ): Promise<void> {
     const requestId = uuid();
 
     try {
+      // 1. Validate minimum required fields
       const validation = jotformBodySchema.safeParse(req.body);
       if (!validation.success) {
-        res.status(400).json({ error: 'Invalid payload', details: validation.error.issues });
+        logger.warn('Invalid webhook body', {
+          requestId,
+          issues: validation.error.issues,
+        });
+        res.status(400).json({
+          error:   'Invalid payload',
+          details: validation.error.issues,
+        });
         return;
       }
 
+      // 2. Parse into clean submission model
       const submission = jotformService.parseWebhookPayload(
         req.body as Record<string, string | string[]>
       );
@@ -37,15 +52,17 @@ export class WebhookController {
         mode:         mappingService.isAutoMapEnabled() ? 'auto' : 'explicit',
       });
 
-      // Respond to JotForm immediately — before any async processing
+      // 3. Respond to JotForm immediately — BEFORE processing.
+      //    JotForm will retry the webhook if we don't reply within ~30 seconds.
+      //    Responding here prevents duplicate submissions.
       res.status(200).json({
         success:      true,
-        message:      'Received',
+        message:      'Received — processing in background',
         submissionId: submission.submissionId,
         requestId,
       });
 
-      // Process in background
+      // 4. Process asynchronously after response is sent
       this.processSubmission(submission, requestId).catch((err: unknown) => {
         logger.error('Background processing failed', {
           requestId,
@@ -59,88 +76,206 @@ export class WebhookController {
     }
   }
 
+  // ── Core processing logic ─────────────────────────────────────────────────
+
   private async processSubmission(
     submission: ParsedJotFormSubmission,
     requestId: string
   ): Promise<void> {
 
-    // ── Step 1: Resolve routing ───────────────────────────────────────────
+    // Step 1 — Resolve which department this submission belongs to
     const departmentKey = this.resolveRouting(submission, requestId);
-    if (!departmentKey) return;
+    if (!departmentKey) {
+      // resolveRouting already logged the reason
+      return;
+    }
 
-    // ── Step 2: Get Bitrix24 client ───────────────────────────────────────
+    // Step 2 — Get the Bitrix24 client for that department
     let client;
     try {
       client = bitrixRegistry.getClient(departmentKey);
     } catch (err) {
-      logger.error('No Bitrix24 client — submission dropped', {
-        requestId, departmentKey,
+      logger.error('Cannot get Bitrix24 client — submission dropped', {
+        requestId,
+        departmentKey,
         error: err instanceof Error ? err.message : String(err),
       });
       return;
     }
 
-    // ── Step 3: Map fields ────────────────────────────────────────────────
+    // Step 3 — Map JotForm fields to Bitrix24 entity fields
     let fields: BitrixLeadFields;
 
     if (mappingService.isAutoMapEnabled()) {
-      // ── AUTO MODE — no config needed, handles any form automatically ──
+      // AUTO MODE — zero config, handles any form automatically
       const globalDefaults = mappingService.getGlobalDefaults();
       const leadDefaults   = (globalDefaults.lead ?? {}) as Record<string, unknown>;
 
-      fields = await mappingService.autoMapSubmission(
+      fields = (await mappingService.autoMapSubmission(
         submission,
         client,
         leadDefaults
-      ) as BitrixLeadFields;
+      )) as BitrixLeadFields;
 
     } else {
-      // ── EXPLICIT MODE — uses fieldMappings from mapping.config.json ───
+      // EXPLICIT MODE — uses fieldMappings from mapping.config.json
       const formConfig = mappingService.getFormConfig(submission.formId);
       if (!formConfig) {
-        logger.error('No mapping config and autoMap is off — submission dropped', {
-          requestId, formId: submission.formId,
-        });
+        logger.error(
+          'No mapping config found for this form and autoMap is off — submission dropped',
+          { requestId, formId: submission.formId }
+        );
         return;
       }
 
-      const mapped = mappingService.mapToEntity(submission, formConfig);
-      fields = mapped as BitrixLeadFields;
+      const entityFields = mappingService.mapToEntity(submission, formConfig);
 
-      // Duplicate check (explicit mode only — auto mode always skips)
+      // Duplicate check (explicit mode only)
       if (!formConfig.skipDuplicateCheck) {
-        const emailField = fields.EMAIL;
+        const emailField = (entityFields as BitrixLeadFields).EMAIL;
         if (Array.isArray(emailField) && emailField[0]) {
           const existing = await client.findLeadByEmail(emailField[0].VALUE);
           if (existing !== null) {
-            logger.warn('Duplicate lead — skipping', {
-              requestId, submissionId: submission.submissionId,
-              department: departmentKey, existingId: existing,
+            logger.warn('Duplicate lead detected — skipping creation', {
+              requestId,
+              submissionId: submission.submissionId,
+              department:   departmentKey,
+              existingId:   existing,
             });
             return;
           }
         }
       }
+
+      // Handle secondary entity (explicit mode only)
+      if (formConfig.secondaryEntity) {
+        void this.createSecondaryEntity(
+          submission,
+          formConfig,
+          client,
+          requestId
+        );
+      }
+
+      fields = entityFields as BitrixLeadFields;
     }
 
-    // ── Step 4: Create Lead in Bitrix24 ───────────────────────────────────
-    const leadId = await client.createLead(fields);
+    // Step 4 — Determine entity type and create in Bitrix24
+    const entityType = this.resolveEntityType(submission.formId);
+
+    await this.createBitrixEntity(
+      entityType,
+      fields,
+      client,
+      submission.submissionId,
+      departmentKey,
+      requestId
+    );
+  }
+
+  /**
+   * Creates the primary Bitrix24 entity (Lead, Contact, or Deal).
+   */
+  private async createBitrixEntity(
+    entityType: 'lead' | 'contact' | 'deal',
+    fields: BitrixLeadFields | BitrixContactFields | BitrixDealFields,
+    client: ReturnType<typeof bitrixRegistry.getClient>,
+    submissionId: string,
+    departmentKey: string,
+    requestId: string
+  ): Promise<void> {
+    let id: number;
+
+    switch (entityType) {
+      case 'lead':
+        id = await client.createLead(fields as BitrixLeadFields);
+        break;
+      case 'contact':
+        id = await client.createContact(fields as BitrixContactFields);
+        break;
+      case 'deal':
+        id = await client.createDeal(fields as BitrixDealFields);
+        break;
+    }
 
     logger.info('Submission processed successfully', {
       requestId,
-      submissionId: submission.submissionId,
-      department:   departmentKey,
-      leadId,
+      submissionId,
+      department: departmentKey,
+      entity:     entityType,
+      id,
     });
   }
 
   /**
+   * Creates a secondary Bitrix24 entity — best effort, never fails the primary.
+   */
+  private async createSecondaryEntity(
+    submission: ParsedJotFormSubmission,
+    formConfig: FormMappingConfig,
+    client: ReturnType<typeof bitrixRegistry.getClient>,
+    requestId: string
+  ): Promise<void> {
+    if (!formConfig.secondaryEntity) return;
+
+    try {
+      const secConfig: FormMappingConfig = {
+        bitrixEntity:       formConfig.secondaryEntity.bitrixEntity,
+        fieldMappings:      formConfig.secondaryEntity.fieldMappings,
+        defaults:           formConfig.secondaryEntity.defaults,
+        skipDuplicateCheck: true,
+      };
+      const secFields = mappingService.mapToEntity(submission, secConfig);
+
+      let secId: number;
+      switch (secConfig.bitrixEntity) {
+        case 'contact':
+          secId = await client.createContact(secFields as BitrixContactFields);
+          break;
+        case 'deal':
+          secId = await client.createDeal(secFields as BitrixDealFields);
+          break;
+        default:
+          secId = await client.createLead(secFields as BitrixLeadFields);
+      }
+
+      logger.info('Secondary entity created', {
+        requestId,
+        entity: secConfig.bitrixEntity,
+        id:     secId,
+      });
+    } catch (err) {
+      logger.error('Secondary entity creation failed (primary was successful)', {
+        requestId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * Determines which Bitrix24 entity type to create.
+   * In auto mode: always Lead (service request forms create Leads).
+   * In explicit mode: reads from form config.
+   */
+  private resolveEntityType(formId: string): 'lead' | 'contact' | 'deal' {
+    if (!mappingService.isAutoMapEnabled()) {
+      const formConfig = mappingService.getFormConfig(formId);
+      if (formConfig) {
+        const entity = formConfig.bitrixEntity;
+        if (entity === 'contact' || entity === 'deal') return entity;
+      }
+    }
+    return 'lead';
+  }
+
+  /**
    * Determines which department this submission belongs to.
-   * Checks in this order:
-   *   1. Form-specific routing (explicit mode)
+   *
+   * Priority order:
+   *   1. Form-specific routing (explicit mode only)
    *   2. Global routing config (both modes)
-   *   3. Only one department configured → use it
-   *   4. Cannot determine → drop and log
+   *   3. Only one department configured → use it automatically
+   *   4. Nothing matches → drop submission and log error
    */
   private resolveRouting(
     submission: ParsedJotFormSubmission,
@@ -152,31 +287,39 @@ export class WebhookController {
       const formConfig = mappingService.getFormConfig(submission.formId);
       if (formConfig?.routing) {
         return mappingService.resolveRoutingDepartment(
-          submission, formConfig.routing, requestId
+          submission,
+          formConfig.routing,
+          requestId
         );
       }
     }
 
-    // Global routing (works in both modes)
+    // Global routing — works in both auto and explicit modes
     const globalRouting = mappingService.getRoutingConfig();
     if (globalRouting) {
       return mappingService.resolveRoutingDepartment(
-        submission, globalRouting, requestId
+        submission,
+        globalRouting,
+        requestId
       );
     }
 
     // Single department — no routing needed
     const keys = bitrixRegistry.getDepartmentKeys();
     if (keys.length === 1) {
-      logger.info('Single department — no routing needed', {
-        requestId, department: keys[0],
+      logger.info('Single department configured — no routing needed', {
+        requestId,
+        department: keys[0],
       });
       return keys[0]!;
     }
 
-    logger.error('Cannot determine department — no routing config and multiple departments exist', {
-      requestId, formId: submission.formId,
-    });
+    logger.error(
+      'Cannot determine target department — ' +
+      'no routing config and multiple departments are configured. ' +
+      'Add globalRouting to mapping.config.json.',
+      { requestId, formId: submission.formId }
+    );
     return null;
   }
 
@@ -186,7 +329,7 @@ export class WebhookController {
     res.json({
       status:      'ok',
       timestamp:   new Date().toISOString(),
-      service:     'jotform-bitrix',
+      service:     'jotform-bitrix-integration',
       mode:        mappingService.isAutoMapEnabled() ? 'auto' : 'explicit',
       departments: bitrixRegistry.getDepartmentKeys(),
     });
@@ -196,6 +339,7 @@ export class WebhookController {
     const results = await bitrixRegistry.healthCheckAll();
     const allOk   = Object.values(results).every(Boolean);
     const anyOk   = Object.values(results).some(Boolean);
+
     res.status(allOk ? 200 : anyOk ? 207 : 503).json({
       status:      allOk ? 'ok' : anyOk ? 'partial' : 'down',
       timestamp:   new Date().toISOString(),
@@ -208,7 +352,7 @@ export class WebhookController {
 
   reloadConfig(_req: Request, res: Response): void {
     mappingService.reload();
-    res.json({ success: true, message: 'Mapping config reloaded' });
+    res.json({ success: true, message: 'Mapping config reloaded from disk' });
   }
 }
 

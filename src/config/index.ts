@@ -60,31 +60,31 @@ function optionalEnv(key: string, fallback: string): string {
 //   BITRIX_BIOMEDICAL_DOMAIN=biomedical.bitrix24.com
 //   ... and so on for each department
 // ─────────────────────────────────────────────────────────────────────────────
-function loadDepartments(): Record<string, BitrixDepartmentConfig> {
-  const raw  = requireEnv('BITRIX_DEPARTMENTS');
-  const keys = raw.split(',').map(k => k.trim().toUpperCase()).filter(Boolean);
+// function loadDepartments(): Record<string, BitrixDepartmentConfig> {
+//   const raw  = requireEnv('BITRIX_DEPARTMENTS');
+//   const keys = raw.split(',').map(k => k.trim().toUpperCase()).filter(Boolean);
 
-  if (keys.length === 0) {
-    throw new Error('[Config] BITRIX_DEPARTMENTS is empty. Add at least one department key.');
-  }
+//   if (keys.length === 0) {
+//     throw new Error('[Config] BITRIX_DEPARTMENTS is empty. Add at least one department key.');
+//   }
 
-  const departments: Record<string, BitrixDepartmentConfig> = {};
+//   const departments: Record<string, BitrixDepartmentConfig> = {};
 
-  for (const key of keys) {
-    const domain = requireEnv(`BITRIX_${key}_DOMAIN`);
-    const userId = requireEnv(`BITRIX_${key}_USER_ID`);
-    const token  = requireEnv(`BITRIX_${key}_TOKEN`);
+//   for (const key of keys) {
+//     const domain = requireEnv(`BITRIX_${key}_DOMAIN`);
+//     const userId = requireEnv(`BITRIX_${key}_USER_ID`);
+//     const token  = requireEnv(`BITRIX_${key}_TOKEN`);
 
-    departments[key] = {
-      domain,
-      userId,
-      webhookToken: token,
-      baseUrl:      `https://${domain}/rest/${userId}/${token}`,
-    };
-  }
+//     departments[key] = {
+//       domain,
+//       userId,
+//       webhookToken: token,
+//       baseUrl:      `https://${domain}/rest/${userId}/${token}`,
+//     };
+//   }
 
-  return departments;
-}
+//   return departments;
+// }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // OPTION B — COMMENTED OUT
@@ -106,29 +106,29 @@ function loadDepartments(): Record<string, BitrixDepartmentConfig> {
 //   BITRIX_DEPARTMENTS=FACILITIES,BIOMEDICAL,ADMIN
 //   (all departments share the same domain/user/token above)
 // ─────────────────────────────────────────────────────────────────────────────
-// function loadSingleDomainDepartments(): Record<string, BitrixDepartmentConfig> {
-//   const domain = requireEnv('BITRIX_DOMAIN');
-//   const userId = requireEnv('BITRIX_USER_ID');
-//   const token  = requireEnv('BITRIX_TOKEN');
-//   const raw    = requireEnv('BITRIX_DEPARTMENTS');
-//   const keys   = raw.split(',').map(k => k.trim().toUpperCase()).filter(Boolean);
-//
-//   if (keys.length === 0) {
-//     throw new Error('[Config] BITRIX_DEPARTMENTS is empty. Add at least one department key.');
-//   }
-//
-//   const baseUrl     = `https://${domain}/rest/${userId}/${token}`;
-//   const departments: Record<string, BitrixDepartmentConfig> = {};
-//
-//   // Every department key points to the exact same portal.
-//   // The key is still used for routing logic and logging —
-//   // so the rest of the code works identically in both options.
-//   for (const key of keys) {
-//     departments[key] = { domain, userId, webhookToken: token, baseUrl };
-//   }
-//
-//   return departments;
-// }
+function loadSingleDomainDepartments(): Record<string, BitrixDepartmentConfig> {
+  const domain = requireEnv('BITRIX_DOMAIN');
+  const userId = requireEnv('BITRIX_USER_ID');
+  const token  = requireEnv('BITRIX_TOKEN');
+  const raw    = requireEnv('BITRIX_DEPARTMENTS');
+  const keys   = raw.split(',').map(k => k.trim().toUpperCase()).filter(Boolean);
+
+  if (keys.length === 0) {
+    throw new Error('[Config] BITRIX_DEPARTMENTS is empty. Add at least one department key.');
+  }
+
+  const baseUrl     = `https://${domain}/rest/${userId}/${token}`;
+  const departments: Record<string, BitrixDepartmentConfig> = {};
+
+  // Every department key points to the exact same portal.
+  // The key is still used for routing logic and logging —
+  // so the rest of the code works identically in both options.
+  for (const key of keys) {
+    departments[key] = { domain, userId, webhookToken: token, baseUrl };
+  }
+
+  return departments;
+}
 
 export const config: Config = {
   server: {
@@ -139,10 +139,10 @@ export const config: Config = {
   },
   bitrix: {
     // ── OPTION A active — separate domain per department ──────────────────
-    departments: loadDepartments(),
+    // departments: loadSingleDomainDepartments(),
 
     // ── OPTION B commented out — single shared domain ─────────────────────
-    // departments: loadSingleDomainDepartments(),
+    departments: loadSingleDomainDepartments(),
 
     rateLimitPerSecond: parseInt(optionalEnv('BITRIX_RATE_LIMIT_PER_SECOND', '2'), 10),
   },

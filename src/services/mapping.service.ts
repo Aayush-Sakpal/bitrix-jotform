@@ -12,33 +12,29 @@ import type {
   FieldTransform,
 } from '../types/mapping.types';
 import { jotformService } from './jotform.service';
-import { toBitrixFieldName, toFieldSuffix } from './field.registry';
+import { toBitrixFieldName } from './field.registry';
 import type { BitrixClient } from './bitrix.service';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // FIELD DETECTION RULES
-//
-// When a form has no explicit mapping config, the auto-mapper uses these rules
-// to detect what kind of data each JotForm field contains by looking at its
-// name. Case-insensitive substring matching.
+// Case-insensitive substring matching against the bare field name.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Fields that match these patterns get mapped to Bitrix24 EMAIL */
-const EMAIL_PATTERNS    = ['email', 'mail', 'e-mail'];
+const EMAIL_PATTERNS = ['email', 'mail', 'e-mail'];
+const PHONE_PATTERNS = ['phone', 'mobile', 'cell', 'tel'];
 
-/** Fields that match these patterns get mapped to Bitrix24 PHONE */
-const PHONE_PATTERNS    = ['phone', 'mobile', 'cell', 'tel', 'contact'];
+const TITLE_PATTERNS = [
+  'name', 'fullname', 'location', 'company',
+  'title', 'organisation', 'organization',
+];
 
-/** Fields that match these patterns are used to build the Lead TITLE */
-const TITLE_PATTERNS    = ['name', 'fullname', 'location', 'company', 'title', 'organisation', 'organization'];
-
-/** Fields we skip entirely — internal JotForm metadata, not real form data */
-const SKIP_FIELDS       = new Set([
+// Internal JotForm metadata — never map these to Bitrix24
+const SKIP_FIELDS = new Set([
   'formid', 'submissionid', 'formtitle', 'ip', 'rawrequest', 'pretty',
   'submitsource', 'submitdate', 'builddate', 'uploadserverurl',
   'eventobserver', 'simple_spc', 'event_id', 'timetosubmit',
   'temp_upload_folder', 'validatednewrequiredfieldids',
-  'jsexecutiontracker', 'website',
+  'jsexecutiontracker', 'website', 'file',
 ]);
 
 function matchesAny(key: string, patterns: string[]): boolean {
@@ -56,6 +52,8 @@ export class MappingService {
   constructor() {
     this.cfg = this.load();
   }
+
+  // ── Config management ─────────────────────────────────────────────────────
 
   private load(): MappingConfig {
     const p = config.mapping.configPath;
@@ -94,15 +92,15 @@ export class MappingService {
     return this.cfg.autoMap === true;
   }
 
-  getRoutingConfig() {
-    return this.cfg.globalRouting ?? null;
+  getRoutingConfig(): MappingConfig['globalRouting'] {
+    return this.cfg.globalRouting ?? undefined;
   }
 
-  getGlobalDefaults() {
+  getGlobalDefaults(): NonNullable<MappingConfig['globalDefaults']> {
     return this.cfg.globalDefaults ?? {};
   }
 
-  // ── Explicit mapping (existing behaviour — unchanged) ─────────────────────
+  // ── Explicit mapping ──────────────────────────────────────────────────────
 
   mapToEntity(
     submission: ParsedJotFormSubmission,
@@ -157,23 +155,19 @@ export class MappingService {
     return result as BitrixEntityFields;
   }
 
-  // ── Auto-mapping (new behaviour — zero config needed) ─────────────────────
+  // ── Auto-mapping ──────────────────────────────────────────────────────────
 
   /**
    * Automatically maps ALL fields from a JotForm submission to Bitrix24
-   * fields without any explicit configuration.
+   * without any explicit configuration.
    *
-   * What it does:
-   *  1. Skips internal JotForm metadata fields
-   *  2. Detects email fields → maps to Bitrix24 EMAIL
-   *  3. Detects phone fields → maps to Bitrix24 PHONE
-   *  4. Everything else     → maps to UF_CRM_{FIELD_NAME} (auto-created if missing)
-   *  5. Builds a TITLE from the best available field
-   *  6. Ensures every custom field exists in Bitrix24 before sending
-   *
-   * @param submission  The parsed JotForm submission
-   * @param client      The Bitrix24 client for the target department
-   * @param defaults    Global defaults merged in (SOURCE_ID, STATUS_ID, etc.)
+   * Rules:
+   *  1. Skip internal JotForm metadata fields
+   *  2. Email fields   → Bitrix24 built-in EMAIL (multi-value)
+   *  3. Phone fields   → Bitrix24 built-in PHONE (multi-value)
+   *  4. Everything else → UF_CRM_{FIELD_NAME} (auto-created if missing)
+   *  5. Best available field used for TITLE
+   *  6. All custom fields confirmed/created before sending Lead
    */
   async autoMapSubmission(
     submission: ParsedJotFormSubmission,
@@ -182,23 +176,18 @@ export class MappingService {
   ): Promise<BitrixEntityFields> {
     const result: Record<string, unknown> = { ...defaults };
     const multi: Record<string, BitrixMultiField[]> = {};
-
-    // Collect field creation promises so we can run them in parallel
     const fieldEnsurePromises: Promise<void>[] = [];
 
-    // Track what we found for TITLE building
     let titleCandidate = '';
 
-    // Process every field in the submission
     for (const [rawKey, value] of Object.entries(submission.fields)) {
-      // Skip duplicates — we store both q3_email and email.
-      // Only process the prefixed version (q3_email) to avoid double-mapping.
-      // If there is no prefixed version, process the bare key.
-      if (/^q\d+_/i.test(rawKey) === false) {
-        // This is a bare key (e.g. "email") — only process if no prefixed
-        // version of this key exists in the submission
+      // Skip bare keys when a prefixed version (q{N}_key) already exists.
+      // Both are stored by jotformService — process only the prefixed one.
+      if (!/^q\d+_/i.test(rawKey)) {
         const prefixedExists = Object.keys(submission.fields).some(
-          k => /^q\d+_/i.test(k) && k.replace(/^q\d+_/i, '').toLowerCase() === rawKey.toLowerCase()
+          k =>
+            /^q\d+_/i.test(k) &&
+            k.replace(/^q\d+_/i, '').toLowerCase() === rawKey.toLowerCase()
         );
         if (prefixedExists) continue;
       }
@@ -207,58 +196,48 @@ export class MappingService {
       const strValue = jotformService.fieldToString(value);
       if (!strValue || strValue.trim() === '') continue;
 
-      // Get the bare key for pattern matching
       const bare = rawKey.replace(/^q\d+_/i, '');
 
-      // Skip internal metadata fields
+      // Skip internal metadata
       if (isSkippable(bare) || isSkippable(rawKey)) continue;
 
-      // ── Email detection ──────────────────────────────────────────────────
+      // ── Email → built-in EMAIL multi-value field only ─────────────────
+      // We do NOT create a separate UF_CRM_ field for email/phone because
+      // the built-in EMAIL/PHONE fields are the correct Bitrix24 home for them.
       if (matchesAny(bare, EMAIL_PATTERNS)) {
         if (!multi['EMAIL']) multi['EMAIL'] = [];
         multi['EMAIL'].push({ VALUE: strValue.trim(), VALUE_TYPE: 'WORK' });
-        // Also store as custom field so it's searchable by name
-        const customField = toBitrixFieldName(rawKey);
-        const label       = toHumanLabel(bare);
-        fieldEnsurePromises.push(client.fieldRegistry.ensureField(customField, label));
-        result[customField] = strValue.trim();
         continue;
       }
 
-      // ── Phone detection ──────────────────────────────────────────────────
+      // ── Phone → built-in PHONE multi-value field only ─────────────────
       if (matchesAny(bare, PHONE_PATTERNS)) {
         if (!multi['PHONE']) multi['PHONE'] = [];
         multi['PHONE'].push({ VALUE: strValue.trim(), VALUE_TYPE: 'WORK' });
-        const customField = toBitrixFieldName(rawKey);
-        const label       = toHumanLabel(bare);
-        fieldEnsurePromises.push(client.fieldRegistry.ensureField(customField, label));
-        result[customField] = strValue.trim();
         continue;
       }
 
-      // ── Title candidate detection ────────────────────────────────────────
+      // ── Title candidate ───────────────────────────────────────────────
       if (!titleCandidate && matchesAny(bare, TITLE_PATTERNS)) {
         titleCandidate = strValue.trim();
       }
 
-      // ── Everything else → custom field ───────────────────────────────────
+      // ── Everything else → custom field ────────────────────────────────
       const bitrixField = toBitrixFieldName(rawKey);
       const label       = toHumanLabel(bare);
 
-      // Queue field creation (runs in parallel below)
       fieldEnsurePromises.push(client.fieldRegistry.ensureField(bitrixField, label));
       result[bitrixField] = strValue.trim();
     }
 
-    // Wait for all field-existence checks/creations to complete
-    // before we send the lead (Bitrix24 rejects unknown fields)
+    // Wait for all field checks/creations before sending to Bitrix24
+    // (Bitrix24 rejects any field it does not know about)
     await Promise.all(fieldEnsurePromises);
 
-    // ── Merge multi-value fields ─────────────────────────────────────────
+    // Merge multi-value fields
     for (const [k, v] of Object.entries(multi)) result[k] = v;
 
-    // ── Build TITLE ──────────────────────────────────────────────────────
-    // Priority: detected title candidate → form title → submission ID
+    // Build TITLE
     if (!result['TITLE']) {
       if (titleCandidate) {
         result['TITLE'] = `Request from ${titleCandidate}`;
@@ -269,7 +248,7 @@ export class MappingService {
       }
     }
 
-    // ── Add submission metadata to COMMENTS ─────────────────────────────
+    // Build COMMENTS with full submission data
     if (!result['COMMENTS']) {
       result['COMMENTS'] = this.buildNote(submission);
     }
@@ -279,10 +258,6 @@ export class MappingService {
 
   // ── Routing ───────────────────────────────────────────────────────────────
 
-  /**
-   * Resolves the department key from a submission using the global routing
-   * config. Works for both auto-map and explicit-mapping modes.
-   */
   resolveRoutingDepartment(
     submission: ParsedJotFormSubmission,
     routingConfig: NonNullable<MappingConfig['globalRouting']>,
@@ -292,48 +267,93 @@ export class MappingService {
     const val = raw ? jotformService.fieldToString(raw).trim() : '';
 
     if (!val) {
-      logger.warn('Routing field empty', {
-        requestId, field: routingConfig.field, submissionId: submission.submissionId,
+      logger.warn('Routing field is empty in submission', {
+        requestId,
+        field:        routingConfig.field,
+        submissionId: submission.submissionId,
       });
     }
 
+    // Case-insensitive match
     const matched = Object.entries(routingConfig.rules).find(
       ([ruleVal]) => ruleVal.toLowerCase() === val.toLowerCase()
     )?.[1];
 
     if (matched) {
-      logger.info('Submission routed', {
-        requestId, field: routingConfig.field, value: val, department: matched,
+      logger.info('Submission routed to department', {
+        requestId,
+        field:      routingConfig.field,
+        value:      val,
+        department: matched,
       });
       return matched.toUpperCase();
     }
 
     if (routingConfig.default) {
-      logger.warn('No routing rule matched — using default', {
-        requestId, value: val, default: routingConfig.default,
+      logger.warn('No routing rule matched — using default department', {
+        requestId,
+        value:          val,
+        default:        routingConfig.default,
+        availableRules: Object.keys(routingConfig.rules),
       });
       return routingConfig.default.toUpperCase();
     }
 
-    logger.error('No routing rule matched and no default — submission dropped', {
-      requestId, value: val, availableRules: Object.keys(routingConfig.rules),
+    logger.error('No routing rule matched and no default set — submission dropped', {
+      requestId,
+      field:          routingConfig.field,
+      value:          val,
+      availableRules: Object.keys(routingConfig.rules),
     });
     return null;
   }
 
   // ── Private helpers ───────────────────────────────────────────────────────
 
+  /**
+   * Resolves a JotForm field value from the submission by trying multiple
+   * key formats in order. Handles prefixes, casing, and spaces.
+   *
+   * Try 1: Exact key as provided                  ("requestCategory")
+   * Try 2: Bare key without q{N}_ prefix          ("requestCategory" from "q11_requestCategory")
+   * Try 3: Case-insensitive bare key match
+   * Try 4: Space-collapsed match                  ("Request Category" → "requestcategory")
+   * Try 5: Space-to-underscore match              ("Request Category" → "request_category")
+   */
   private resolveField(
     submission: ParsedJotFormSubmission,
     key: string
   ): JotFormFieldValue {
+    // Try 1 — exact
     if (key in submission.fields) return submission.fields[key] ?? null;
-    const bare  = key.replace(/^q\d+_/i, '');
+
+    // Try 2 — strip q{N}_ prefix
+    const bare = key.replace(/^q\d+_/i, '');
     if (bare in submission.fields) return submission.fields[bare] ?? null;
-    const lower = bare.toLowerCase();
+
+    const bareLower = bare.toLowerCase();
+
+    // Try 3 — case-insensitive
     for (const [k, v] of Object.entries(submission.fields)) {
-      if (k.replace(/^q\d+_/i, '').toLowerCase() === lower) return v ?? null;
+      if (k.replace(/^q\d+_/i, '').toLowerCase() === bareLower) {
+        return v ?? null;
+      }
     }
+
+    // Try 4 — collapse spaces ("Request Category" → "requestcategory")
+    const bareNoSpaces = bareLower.replace(/\s+/g, '');
+    for (const [k, v] of Object.entries(submission.fields)) {
+      const kNorm = k.replace(/^q\d+_/i, '').toLowerCase().replace(/\s+/g, '');
+      if (kNorm === bareNoSpaces) return v ?? null;
+    }
+
+    // Try 5 — spaces to underscores ("Request Category" → "request_category")
+    const bareUnderscored = bareLower.replace(/\s+/g, '_');
+    for (const [k, v] of Object.entries(submission.fields)) {
+      const kNorm = k.replace(/^q\d+_/i, '').toLowerCase().replace(/\s+/g, '_');
+      if (kNorm === bareUnderscored) return v ?? null;
+    }
+
     return null;
   }
 
@@ -364,8 +384,14 @@ export class MappingService {
       }
       case 'joinAddress': {
         if (jotformService.isAddressField(value)) {
-          return [value.addr_line1, value.addr_line2, value.city, value.state, value.postal, value.country]
-            .filter(Boolean).join(', ') || null;
+          return (
+            [
+              value.addr_line1, value.addr_line2, value.city,
+              value.state, value.postal, value.country,
+            ]
+              .filter(Boolean)
+              .join(', ') || null
+          );
         }
         return str || null;
       }
@@ -383,15 +409,15 @@ export class MappingService {
 
   private buildNote(submission: ParsedJotFormSubmission, appendNote?: string): string {
     const lines = [
-      `Form: ${submission.formTitle}`,
+      `Form:          ${submission.formTitle}`,
       `Submission ID: ${submission.submissionId}`,
-      `Submitted At: ${submission.submittedAt.toISOString()}`,
-      `IP: ${submission.submitterIp}`,
+      `Submitted At:  ${submission.submittedAt.toISOString()}`,
+      `IP:            ${submission.submitterIp}`,
       '',
-      'All submitted fields:',
+      'Submitted Fields:',
     ];
     for (const [key, val] of Object.entries(submission.fields)) {
-      if (/^q\d+_/i.test(key)) continue;
+      if (/^q\d+_/i.test(key)) continue; // skip prefixed duplicates
       if (isSkippable(key)) continue;
       const s = jotformService.fieldToString(val);
       if (s) lines.push(`  ${key}: ${s}`);
@@ -401,10 +427,12 @@ export class MappingService {
   }
 }
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
 /**
- * Converts a camelCase or snake_case field name into a readable label.
- * e.g. "requestCategory" → "Request Category"
- *      "qmc_location"    → "Qmc Location"
+ * Converts a camelCase / snake_case bare field name into a readable label.
+ * "requestCategory" → "Request Category"
+ * "qmc_location"    → "Qmc Location"
  */
 function toHumanLabel(bare: string): string {
   return bare
