@@ -24,8 +24,7 @@ const EMAIL_PATTERNS = ['email', 'mail', 'e-mail'];
 const PHONE_PATTERNS = ['phone', 'mobile', 'cell', 'tel'];
 
 const TITLE_PATTERNS = [
-  'name', 'fullname', 'location', 'company',
-  'title', 'organisation', 'organization',
+  'requestTitle', 'request_title', 'title',
 ];
 
 // Internal JotForm metadata — never map these to Bitrix24
@@ -255,7 +254,7 @@ export class MappingService {
     // Build TITLE
     if (!result['TITLE']) {
       if (titleCandidate) {
-        result['TITLE'] = `Request from ${titleCandidate}`;
+        result['TITLE'] = titleCandidate;
       } else if (submission.formTitle && submission.formTitle !== 'Unknown Form') {
         result['TITLE'] = `${submission.formTitle} — ${submission.submissionId}`;
       } else {
