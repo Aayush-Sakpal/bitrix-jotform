@@ -49,8 +49,13 @@ function optionalEnv(key: string, fallback: string): string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// OPTION A — ACTIVE
-// Each department has its OWN separate Bitrix24 portal (different domains).
+// OPTION A — Each department has its OWN separate Bitrix24 portal.
+//
+// To activate:
+//   1. Uncomment loadDepartments() below
+//   2. Comment out loadSingleDomainDepartments() below
+//   3. In the config object, swap the active line in bitrix.departments
+//   4. Update .env to use per-department variables
 //
 // Required .env variables:
 //   BITRIX_DEPARTMENTS=FACILITIES,BIOMEDICAL,ADMIN
@@ -63,18 +68,18 @@ function optionalEnv(key: string, fallback: string): string {
 // function loadDepartments(): Record<string, BitrixDepartmentConfig> {
 //   const raw  = requireEnv('BITRIX_DEPARTMENTS');
 //   const keys = raw.split(',').map(k => k.trim().toUpperCase()).filter(Boolean);
-
+//
 //   if (keys.length === 0) {
 //     throw new Error('[Config] BITRIX_DEPARTMENTS is empty. Add at least one department key.');
 //   }
-
+//
 //   const departments: Record<string, BitrixDepartmentConfig> = {};
-
+//
 //   for (const key of keys) {
 //     const domain = requireEnv(`BITRIX_${key}_DOMAIN`);
 //     const userId = requireEnv(`BITRIX_${key}_USER_ID`);
 //     const token  = requireEnv(`BITRIX_${key}_TOKEN`);
-
+//
 //     departments[key] = {
 //       domain,
 //       userId,
@@ -82,29 +87,20 @@ function optionalEnv(key: string, fallback: string): string {
 //       baseUrl:      `https://${domain}/rest/${userId}/${token}`,
 //     };
 //   }
-
+//
 //   return departments;
 // }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// OPTION B — COMMENTED OUT
-// ALL departments share ONE single Bitrix24 portal (same domain).
-// All submissions go to the same Bitrix24 — routing only determines
-// which assigned user / pipeline / category they get tagged with.
+// OPTION B — ACTIVE
+// All departments share ONE single Bitrix24 portal (same domain/user/token).
+// Routing still works — each department key is tracked separately for logging.
 //
-// To switch to this option:
-//   1. Comment out the loadDepartments() function above
-//   2. Comment out Option A in the config object below
-//   3. Uncomment the loadSingleDomainDepartments() function below
-//   4. Uncomment Option B in the config object below
-//   5. Update your .env to use the single-domain variables
-//
-// Required .env variables for Option B:
-//   BITRIX_DOMAIN=mycompany.bitrix24.com
-//   BITRIX_USER_ID=1
-//   BITRIX_TOKEN=abc123
+// Required .env variables:
 //   BITRIX_DEPARTMENTS=FACILITIES,BIOMEDICAL,ADMIN
-//   (all departments share the same domain/user/token above)
+//   BITRIX_DOMAIN=mycompany.bitrix24.com
+//   BITRIX_USER_ID=11
+//   BITRIX_TOKEN=your_token_here
 // ─────────────────────────────────────────────────────────────────────────────
 function loadSingleDomainDepartments(): Record<string, BitrixDepartmentConfig> {
   const domain = requireEnv('BITRIX_DOMAIN');
@@ -120,9 +116,6 @@ function loadSingleDomainDepartments(): Record<string, BitrixDepartmentConfig> {
   const baseUrl     = `https://${domain}/rest/${userId}/${token}`;
   const departments: Record<string, BitrixDepartmentConfig> = {};
 
-  // Every department key points to the exact same portal.
-  // The key is still used for routing logic and logging —
-  // so the rest of the code works identically in both options.
   for (const key of keys) {
     departments[key] = { domain, userId, webhookToken: token, baseUrl };
   }
@@ -138,10 +131,10 @@ export const config: Config = {
     allowedOrigins: optionalEnv('ALLOWED_ORIGINS', '*').split(',').map(s => s.trim()),
   },
   bitrix: {
-    // ── OPTION A active — separate domain per department ──────────────────
-    // departments: loadSingleDomainDepartments(),
+    // ── OPTION A (separate domains per department) — commented out ────────
+    // departments: loadDepartments(),
 
-    // ── OPTION B commented out — single shared domain ─────────────────────
+    // ── OPTION B (single shared domain) — ACTIVE ─────────────────────────
     departments: loadSingleDomainDepartments(),
 
     rateLimitPerSecond: parseInt(optionalEnv('BITRIX_RATE_LIMIT_PER_SECOND', '2'), 10),
