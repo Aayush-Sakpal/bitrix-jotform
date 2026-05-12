@@ -195,7 +195,7 @@ export class BitrixClient {
    * @param label   Human-readable label shown in Bitrix24 UI
    */
   async createDealField(suffix: string, label: string): Promise<void> {
-    await this.callOnce<unknown>('crm.userfield.add', {
+    await this.callOnce<unknown>('crm.deal.userfield.add', {
       fields: {
         ENTITY_ID:         'CRM_DEAL',
         FIELD_NAME:        suffix,
