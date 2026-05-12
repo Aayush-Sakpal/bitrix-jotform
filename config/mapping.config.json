@@ -12,9 +12,9 @@
   },
 
   "globalDefaults": {
-    "lead": {
+    "deal": {
       "SOURCE_ID":      "WEB",
-      "STATUS_ID":      "NEW",
+      "CATEGORY_ID":      2,
       "ASSIGNED_BY_ID": "11"
     }
   },

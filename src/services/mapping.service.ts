@@ -167,7 +167,7 @@ export class MappingService {
    *  3. Phone fields   → Bitrix24 built-in PHONE (multi-value)
    *  4. Everything else → UF_CRM_{FIELD_NAME} (auto-created if missing)
    *  5. Best available field used for TITLE
-   *  6. All custom fields confirmed/created before sending Lead
+   *  6. All custom fields confirmed/created before sending Deal
    */
   async autoMapSubmission(
     submission: ParsedJotFormSubmission,
@@ -367,7 +367,7 @@ export class MappingService {
       case 'trim':        return str.trim();
       case 'uppercase':   return str.toUpperCase();
       case 'lowercase':   return str.toLowerCase();
-      case 'nameToTitle': return str ? `Lead from ${str}` : null;
+      case 'nameToTitle': return str ? `Deal from ${str}` : null;
       case 'joinName': {
         if (jotformService.isNameField(value)) {
           return [value.first, value.last].filter(Boolean).join(' ').trim() || str || null;

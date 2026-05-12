@@ -3,3 +3,6 @@ dist/
 .env
 logs/
 *.log
+src/utils/debug*
+src/utils/check-fields.js
+src/utils/create-fields.js

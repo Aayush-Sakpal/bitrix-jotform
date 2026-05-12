@@ -104,18 +104,18 @@ export class WebhookController {
     }
 
     // Step 3 — Map JotForm fields to Bitrix24 entity fields
-    let fields: BitrixLeadFields;
+    let fields: BitrixDealFields;
 
     if (mappingService.isAutoMapEnabled()) {
       // AUTO MODE — zero config, handles any form automatically
       const globalDefaults = mappingService.getGlobalDefaults();
-      const leadDefaults   = (globalDefaults.lead ?? {}) as Record<string, unknown>;
+      const dealDefaults   = (globalDefaults.deal ?? {}) as Record<string, unknown>;
 
       fields = (await mappingService.autoMapSubmission(
         submission,
         client,
-        leadDefaults
-      )) as BitrixLeadFields;
+        dealDefaults
+      )) as BitrixDealFields;
 
     } else {
       // EXPLICIT MODE — uses fieldMappings from mapping.config.json
@@ -132,11 +132,11 @@ export class WebhookController {
 
       // Duplicate check (explicit mode only)
       if (!formConfig.skipDuplicateCheck) {
-        const emailField = (entityFields as BitrixLeadFields).EMAIL;
+        const emailField = (entityFields as BitrixDealFields).EMAIL;
         if (Array.isArray(emailField) && emailField[0]) {
-          const existing = await client.findLeadByEmail(emailField[0].VALUE);
+          const existing = await client.findDealByEmail(emailField[0].VALUE);
           if (existing !== null) {
-            logger.warn('Duplicate lead detected — skipping creation', {
+            logger.warn('Duplicate deal detected — skipping creation', {
               requestId,
               submissionId: submission.submissionId,
               department:   departmentKey,
@@ -157,7 +157,7 @@ export class WebhookController {
         );
       }
 
-      fields = entityFields as BitrixLeadFields;
+      fields = entityFields as BitrixDealFields;
     }
 
     // Step 4 — Determine entity type and create in Bitrix24
@@ -236,7 +236,7 @@ export class WebhookController {
           secId = await client.createDeal(secFields as BitrixDealFields);
           break;
         default:
-          secId = await client.createLead(secFields as BitrixLeadFields);
+          secId = await client.createDeal(secFields as BitrixDealFields);
       }
 
       logger.info('Secondary entity created', {
@@ -254,7 +254,7 @@ export class WebhookController {
 
   /**
    * Determines which Bitrix24 entity type to create.
-   * In auto mode: always Lead (service request forms create Leads).
+   * In auto mode: always Deal (service request forms create Deals).
    * In explicit mode: reads from form config.
    */
   private resolveEntityType(formId: string): 'lead' | 'contact' | 'deal' {
@@ -262,10 +262,10 @@ export class WebhookController {
       const formConfig = mappingService.getFormConfig(formId);
       if (formConfig) {
         const entity = formConfig.bitrixEntity;
-        if (entity === 'contact' || entity === 'deal') return entity;
+        if (entity === 'contact' || entity === 'lead') return entity;
       }
     }
-    return 'lead';
+    return 'deal';
   }
 
   /**

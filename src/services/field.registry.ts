@@ -50,7 +50,7 @@ export function toBitrixFieldName(jotformKey: string): string {
  * On startup  → fetches the full field list from Bitrix24 and caches it.
  * On submit   → checks the cache. If field exists: instant return (no API call).
  *               If field is missing: attempts to create it, then caches it.
- * On failure  → logs clearly and continues. Never crashes a Lead submission.
+ * On failure  → logs clearly and continues. Never crashes a Deal submission.
  */
 export class FieldRegistry {
   private knownFields:  Set<string>    = new Set();
@@ -68,7 +68,7 @@ export class FieldRegistry {
   // ── Initialisation ────────────────────────────────────────────────────────
 
   /**
-   * Fetches all existing Lead fields from Bitrix24 and caches their names.
+   * Fetches all existing Deal fields from Bitrix24 and caches their names.
    * Must be called once at startup before processing any submissions.
    */
   async init(): Promise<void> {
@@ -83,7 +83,7 @@ export class FieldRegistry {
     this.initialising = true;
 
     try {
-      const fields     = await this.client.getLeadFields();
+      const fields     = await this.client.getDealFields();
       this.knownFields = new Set(Object.keys(fields));
       this.initialised = true;
 
@@ -112,7 +112,7 @@ export class FieldRegistry {
   // ── Field existence guarantee ─────────────────────────────────────────────
 
   /**
-   * Ensures a custom field exists in Bitrix24 before we send a Lead with it.
+   * Ensures a custom field exists in Bitrix24 before we send a Deal with it.
    *
    * Outcomes:
    *   Field already known  →  instant return (cache hit)
@@ -121,7 +121,7 @@ export class FieldRegistry {
    *   Any other error  →  logs warning, skips this field, returns
    *
    * This method NEVER throws. A field management failure must never
-   * prevent the Lead itself from being created.
+   * prevent the Deal itself from being created.
    *
    * @param fullFieldName  e.g. "UF_CRM_FACILITIES_SERVICE"
    * @param label          Human-readable label shown in Bitrix24 UI
@@ -152,7 +152,7 @@ export class FieldRegistry {
       : fullFieldName;
 
     try {
-      await this.client.createLeadField(suffix, label);
+      await this.client.createDealField(suffix, label);
 
       // Creation succeeded — cache it and mark that this portal supports creation
       this.knownFields.add(fullFieldName);
@@ -202,7 +202,7 @@ export class FieldRegistry {
         logger.warn(
           `Bitrix24 webhook token cannot create custom fields (${errCode}). ` +
           `The field "${fullFieldName}" (label: "${label}") must be created manually. ` +
-          `Go to: Bitrix24 → CRM → Settings ⚙️ → Custom Fields → Leads → Add Field. ` +
+          `Go to: Bitrix24 → CRM → Settings ⚙️ → Custom Fields → Deals → Add Field. ` +
           `Field code: ${suffix}. ` +
           `This field will be SKIPPED in submissions until it is created manually.`,
           {

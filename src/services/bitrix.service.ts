@@ -115,7 +115,7 @@ export class BitrixClient {
   // because:
   //   a) ERROR_METHOD_NOT_FOUND won't fix itself on retry
   //   b) Field already existing is not an error
-  //   c) We don't want field management issues to delay Lead creation
+  //   c) We don't want field management issues to delay Deal creation
   async callOnce<T>(method: string, params: Record<string, unknown>): Promise<T> {
     await this.limiter.throttle();
     const res  = await this.http.post<BitrixApiResponse<T>>(`/${method}`, params);
@@ -157,9 +157,9 @@ export class BitrixClient {
     return id;
   }
 
-  async findLeadByEmail(email: string): Promise<number | null> {
+  async findDealByEmail(email: string): Promise<number | null> {
     try {
-      const rows = await this.call<Array<{ ID: string }>>('crm.lead.list', {
+      const rows = await this.call<Array<{ ID: string }>>('crm.deal.list', {
         filter: { EMAIL: email },
         select: ['ID'],
       });
@@ -178,15 +178,15 @@ export class BitrixClient {
   // ── Field management methods ──────────────────────────────────────────────
 
   /**
-   * Fetches ALL Lead field definitions from this portal.
+   * Fetches ALL Deal field definitions from this portal.
    * Uses callOnce — no retries needed, this is read-only discovery.
    */
-  async getLeadFields(): Promise<Record<string, unknown>> {
-    return this.callOnce<Record<string, unknown>>('crm.lead.fields', {});
+  async getDealFields(): Promise<Record<string, unknown>> {
+    return this.callOnce<Record<string, unknown>>('crm.deal.fields', {});
   }
 
   /**
-   * Creates a new string custom field on CRM Leads.
+   * Creates a new string custom field on CRM Deals.
    * Uses callOnce — field creation must never be retried because:
    *   - Retrying a successful creation causes a DUPLICATE error
    *   - Retrying a METHOD_NOT_FOUND won't suddenly grant permissions
@@ -194,10 +194,10 @@ export class BitrixClient {
    * @param suffix  The part AFTER UF_CRM_  e.g. "FACILITIES_SERVICE"
    * @param label   Human-readable label shown in Bitrix24 UI
    */
-  async createLeadField(suffix: string, label: string): Promise<void> {
+  async createDealField(suffix: string, label: string): Promise<void> {
     await this.callOnce<unknown>('crm.userfield.add', {
       fields: {
-        ENTITY_ID:         'CRM_LEAD',
+        ENTITY_ID:         'CRM_DEAL',
         FIELD_NAME:        suffix,
         USER_TYPE_ID:      'string',
         EDIT_FORM_LABEL:   label,
